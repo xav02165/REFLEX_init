@@ -1,90 +1,118 @@
 import reflex as rx
-import random
+from typing import List, Dict, Any
+import sqlmodel
 
 # =====================================================================
-# 1. ÉTAT DE L'APPLICATION (Logique métier)
+# 1. MODÈLES DE LA BASE DE DONNÉES (Réf: Votre schéma SQLite)
 # =====================================================================
+
+class Villes(rx.Model, table=True):
+    """Modèle pour la table 'villes'"""
+    id: int = sqlmodel.Field(default=None, primary_key=True)
+    nom: str = sqlmodel.Field(index=True, unique=True, nullable=False)
+    latitude: float
+    longitude: float
+
+class Releves(rx.Model, table=True):
+    """Modèle pour la table 'releves'"""
+    id: int = sqlmodel.Field(default=None, primary_key=True)
+    ville_id: int = sqlmodel.Field(foreign_key="villes.id", nullable=False)
+    temperature: float
+    vitesse_vent: float
+    date_heure: str
+
+# =====================================================================
+# 2. ÉTAT DE L'APPLICATION (Logique de chargement)
+# =====================================================================
+
 class DataState(rx.State):
-    # Données brutes simulées (ex: Ventes par mois pour deux catégories)
-    full_data: list[dict] = [
-        {"mois": "Jan", "Électronique": 4000, "Mode": 2400},
-        {"mois": "Fév", "Électronique": 3000, "Mode": 1398},
-        {"mois": "Mar", "Électronique": 2000, "Mode": 9800},
-        {"mois": "Avr", "Électronique": 2780, "Mode": 3908},
-        {"mois": "Mai", "Électronique": 1890, "Mode": 4800},
-        {"mois": "Juin", "Électronique": 2390, "Mode": 3800},
-    ]
+    # Liste pour stocker les relevés formatés pour Recharts
+    chart_data: List[Dict[str, Any]] = []
     
-    # Filtre sélectionné par l'utilisateur
-    selected_category: str = "Toutes"
-    
-    # Fonction pour modifier le filtre
-    def set_category(self, value: str):
-        self.selected_category = value
+    # KPIs calculés
+    avg_temp: str = "N/A"
+    max_vent: str = "N/A"
 
-    # Propriété calculée (Computed Var) : se met à jour automatiquement
-    @rx.var
-    def total_ventes(self) -> str:
-        total = 0
-        for item in self.full_data:
-            if self.selected_category == "Électronique":
-                total += item["Électronique"]
-            elif self.selected_category == "Mode":
-                total += item["Mode"]
-            else:
-                total += item["Électronique"] + item["Mode"]
-        return f"{total:,} €"
+    def charger_donnees(self):
+        """Récupère les données de SQLite et les prépare pour la Dataviz"""
+        with rx.session() as session:
+            # 1. Récupérer l'ID de Dunkerque
+            ville = session.exec(
+                sqlmodel.select(Villes).where(Villes.nom == "Dunkerque")
+            ).first()
+            
+            if not ville:
+                self.chart_data = []
+                return
 
-    
- #=====================================================================
-# ÉTAPE B : AJOUTER LE COMPOSANT KPI ICI (Il manquait probablement)
+            # 2. Récupérer les relevés associés à cette ville ordonnés par date
+            releves = session.exec(
+                sqlmodel.select(Releves)
+                .where(Releves.ville_id == ville.id)
+                .order_by(Releves.date_heure)
+            ).all()
+
+            # 3. Formater les données pour Recharts (inverser l'ordre si besoin)
+            formatted = []
+            tot_temp = 0.0
+            max_w = 0.0
+
+            for r in reversed(releves): # Du plus ancien au plus récent
+                # On nettoie la date pour l'affichage (ex: "2026-11-05T12:00" -> "05/11 12:00")
+                date_propre = r.date_heure.replace("2026-", "").replace("T", " ")
+                
+                formatted.append({
+                    "date": date_propre,
+                    "Température (°C)": round(r.temperature, 1),
+                    "Vent (km/h)": round(r.vitesse_vent, 1)
+                })
+                tot_temp += r.temperature
+                if r.vitesse_vent > max_w:
+                    max_w = r.vitesse_vent
+
+            self.chart_data = formatted
+            
+            # Calcul des KPIs globaux
+            if releves:
+                self.avg_temp = f"{round(tot_temp / len(releves), 1)} °C"
+                self.max_vent = f"{round(max_w, 1)} km/h"
+
+
 # =====================================================================
-def kpi_card(title: str, value: str, change: str, is_positive: bool) -> rx.Component:
-    badge_color = "green" if is_positive else "red"
-    badge_icon = "trending-up" if is_positive else "trending-down"
-    
+# 3. INTERFACE COMPOSANTS & DASHBOARD
+# =====================================================================
+
+def kpi_card(title: str, value: str, icon_name: str, color: str) -> rx.Component:
     return rx.card(
-        rx.vstack(
-            rx.text(title, size="2", color_scheme="gray"),
-            rx.hstack(
+        rx.hstack(
+            rx.vstack(
+                rx.text(title, size="2", color_scheme="gray"),
                 rx.text(value, size="6", weight="bold"),
-                rx.badge(
-                    rx.icon(badge_icon, size=14),
-                    change,
-                    color_scheme=badge_color,
-                    variant="soft",
-                ),
-                align="center",
-                spacing="2",
+                align="start",
+                spacing="1",
             ),
-            align="start",
-            spacing="1",
+            rx.icon(icon_name, size=28, color=color),
+            justify="between",
+            align="center",
+            width="100%",
         ),
         width="100%",
     )
 
-# =====================================================================
-# ÉTAPE C : L'interface principale (qui appelle kpi_card)
-# =====================================================================
-def index() -> rx.Component:
-    return rx.vstack
-# =====================================================================
-# 2. INTERFACE UTILISATEUR
-# =====================================================================
 def index() -> rx.Component:
     return rx.vstack(
-        # Barre supérieure / Header
+        # Header
         rx.hstack(
             rx.vstack(
-                rx.heading("Dashboard Commercial", size="6"),
-                rx.text("Suivi des performances mensuelles", color_scheme="gray"),
+                rx.heading("Suivi Météo Réel", size="6"),
+                rx.text("Station : Dunkerque", color_scheme="gray", weight="medium"),
             ),
-            # Menu déroulant pour filtrer
-            rx.select(
-                ["Toutes", "Électronique", "Mode"],
-                value=DataState.selected_category,
-                on_change=DataState.set_category,
-                width="200px",
+            # Bouton pour charger/rafraîchir les données depuis SQLite
+            rx.button(
+                "Charger les relevés", 
+                on_click=DataState.charger_donnees,
+                color_scheme="indigo",
+                icon="refresh-cw"
             ),
             justify="between",
             align="center",
@@ -93,35 +121,26 @@ def index() -> rx.Component:
             padding_bottom="4",
         ),
 
-        # Section des KPIs
+        # KPIs Cards
         rx.grid(
-            kpi_card("Chiffre d'Affaires Global", DataState.total_ventes, "+12.4%", True),
-            kpi_card("Objectif Annuel", "65%", "-2.1%", False),
-            kpi_card("Clients Actifs", "1,248", "+8.3%", True),
-            columns="3",
+            kpi_card("Température Moyenne", DataState.avg_temp, "thermometer", "orange"),
+            kpi_card("Rafale de Vent Max", DataState.max_vent, "wind", "blue"),
+            columns="2",
             spacing="4",
             width="100%",
         ),
 
-        # Section du Graphique principal
+        # Graphique Mixte (Lignes)
         rx.card(
             rx.vstack(
-                rx.text("Évolution des ventes par segment", size="3", weight="medium"),
+                rx.text("Évolution Température vs Vitesse du vent", size="3", weight="medium"),
                 rx.recharts.line_chart(
-                    # Ligne 1 : Électronique (masquée si le filtre est sur 'Mode')
-                    rx.cond(
-                        DataState.selected_category != "Mode",
-                        rx.recharts.line(data_key="Électronique", stroke="#3B82F6", stroke_width=2),
-                    ),
-                    # Ligne 2 : Mode (masquée si le filtre est sur 'Électronique')
-                    rx.cond(
-                        DataState.selected_category != "Électronique",
-                        rx.recharts.line(data_key="Mode", stroke="#10B981", stroke_width=2),
-                    ),
-                    rx.recharts.x_axis(data_key="mois"),
+                    rx.recharts.line(data_key="Température (°C)", stroke="#F97316", stroke_width=2),
+                    rx.recharts.line(data_key="Vent (km/h)", stroke="#3B82F6", stroke_width=2),
+                    rx.recharts.x_axis(data_key="date"),
                     rx.recharts.y_axis(),
                     rx.recharts.graphing_tooltip(),
-                    data=DataState.full_data,
+                    data=DataState.chart_data,
                     width="100%",
                     height=350,
                 ),
@@ -134,9 +153,9 @@ def index() -> rx.Component:
         padding="6",
         spacing="5",
         width="100%",
-        max_width="1200px",
+        max_width="1000px",
     )
 
-# Config de l'application
 app = rx.App()
 app.add_page(index)
+
